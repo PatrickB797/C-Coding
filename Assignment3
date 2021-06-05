@@ -1,0 +1,189 @@
+/*
+===============================================================================
+ Name        : Assignment3.c
+ Author      : Patrick Bohn, Coby Moore, Andrew McMasters
+ Version     :
+ Copyright   : $(copyright)
+ Description : main definition
+===============================================================================
+*/
+
+//pg120 for clkselect
+
+#ifdef __USE_CMSIS
+#include "LPC17xx.h"
+#endif
+
+#include <cr_section_macros.h>
+
+
+//set up FIO and PLL for use
+struct FIOstruct {
+    unsigned int DIR;
+    unsigned int filler[3]; // so MASK has offset 0x10 from DIR
+    unsigned int MASK;
+    unsigned int PIN;
+    unsigned int SET;
+    unsigned int CLR;
+};
+
+struct PLLstruct {
+    unsigned int CON;
+    unsigned int CFG;
+    unsigned int STAT;
+    unsigned int FEED;
+};
+
+//Define Memory locations I will use
+#define FIO ((volatile struct FIOstruct *)0x2009c000)
+#define PLL ((volatile struct PLLstruct *)0x400fc080)
+#define CLKSRCSEL (*(volatile unsigned int *)0x400fc10c)
+#define CCLKCFG   (*(volatile unsigned int *)0x400FC104)
+#define USBCLKCFG (*(volatile unsigned int *)0x400FC108)
+#define CLKOUTCFG (*(volatile unsigned int *)0x400FC1C8)
+#define PINSEL3   (*(volatile unsigned int *)0x4002C00C)
+#define PINMODE3  (*(volatile unsigned int *)0x4002c04C)
+
+
+void feedSignal(){ // Gives me an easier way to call the signal to set values in the Pll
+    PLL[0].FEED = 0xaa;
+    PLL[0].FEED = 0x55;
+    return;
+}
+
+void wait_ticks(int ticks)
+{
+    volatile int count;
+    for (count=0; count<ticks; count++){
+        //do nothing
+    }//for (count=0...)
+}//void wait_ticks
+
+void disconnectPLL(){ //Gives me an easier way to disconnect the PLL for editing
+    PLL[0].CON &= ~(1<<1); //Disconnect PLL
+    feedSignal();
+    PLL[0].CON &= ~(1<<0); //Disable PLL
+    feedSignal();
+    return;
+}
+
+
+void enablePLL0(){ //Turns on PLL then waits til Locked
+    PLL[0].CON |= (1<<0); //Enable PLL
+    feedSignal();
+    while(((PLL[0].STAT>>26)&1)==0){
+        //Do nothing while PLL not locked
+    }
+}
+
+void reconnectPLL(){
+    PLL[0].CON |= (1<<1); //Reconnect PLL
+    feedSignal();
+    return;
+}
+
+void setClockSource(int mode){ //Gives a slightly easier way to set Clock Source
+    switch(mode){
+        case 0:
+            //Sets IRC as clk source
+            CLKSRCSEL&=~(1<<1)&~(1<<0);
+        break;
+        case 1:
+            // Sets Main Osc as clk source
+            CLKSRCSEL&=~(1<<1);
+            CLKSRCSEL|=(1<<0);
+        break;
+        case 10:
+            //Sets RTC as clk Source
+            CLKSRCSEL&=~(1<<0);
+            CLKSRCSEL|=(1<<1);
+        break;
+        default:
+            //if not one of the 3 modes, do nothing
+        break;
+    }
+    return;
+}
+
+void setM(int M){ // Gives me an easier way to set M. Will clear N when used so must be reset.
+    PLL[0].CFG=(M-1); //Set M to M fed in - 1 to adjust for 0 being valid
+    feedSignal();
+}
+
+void setN(int N){ // Gives me an easier way to set N
+    PLL[0].CFG|=((N-1)<<16); //Set N to N fed in - 1 to adjust for 0 being valid
+    feedSignal();
+}
+
+
+void setCpuDiv(int Pllo,int target){ // Set the CPU divider to the current PLL Output divided by what you want it to be - 1 to adjust for 0
+    int div = (Pllo/target)-1;
+    CCLKCFG = div;
+}
+
+void setClkOut(int mode){  //Sets the CLK OUT Pin to actually output
+    CLKOUTCFG = 0;
+    CLKOUTCFG|=(1<<8);
+    return;
+}
+
+void turnOnClkOutPin(){ //Sets pin to be CLK Out mode
+    PINSEL3 |= (1<<22);
+    PINSEL3    &= ~(1<<23);
+}
+
+void setupButtons(){ // Sets up the button to be used in active low mode
+    PINMODE3 &= ~(1<<30) & ~(1<<31);
+    FIO[1].DIR &= ~(1<<30) & ~(1<<31);
+}
+
+int main(void) {
+    // Sets initial mode to the 9MHz mode
+    int mode = 9;
+    while(1){
+        //switch on mode
+        switch(mode){
+            case 9:
+                //9 MHz mode
+                disconnectPLL();
+                setClockSource(0);
+                //4Mhz*72=288Mhz in range and is divisible by 48 and 9
+                setM(36); //sets M to 36
+                setN(1);  //sets N to 1
+                enablePLL0(); //turns PLL back on
+                setCpuDiv(288,9); //Sets CPU divider to 288/9
+                reconnectPLL(); // reconnects PLL
+                setClkOut(0); // Sets Clk Pin to output.
+                turnOnClkOutPin(); //Sets Clk Pin to output Clk Out
+                while(((FIO[1].PIN>>31)&1)==1){
+                    //Do nothing until button pressed
+                }
+                mode = 11; //Set mode to 11MHz
+                wait_ticks(200000); //Prevent Switch Bounce
+            break;
+            case 11:
+                disconnectPLL();
+                setClockSource(0);
+                // 4MHz * 132 = 528MHz in range and is divisible by 48 and 11
+                setM(66); //Set M to 66
+                setN(1);  //Set N to 1
+                enablePLL0(); //Enable PLL
+                setCpuDiv(528,11); //Sets CPU divider to 528/11
+                reconnectPLL(); //reconnect PLL
+                setClkOut(0);   //Set Clk Pin to output
+                turnOnClkOutPin(); // Set Clk Pin to output Clk Out
+                while(((FIO[1].PIN>>31)&1)==1){
+                    //Do nothing until button pressed
+                }
+                mode = 9; // Set mode to 9MHz
+                wait_ticks(200000); //Prevent switch bounce
+            break;
+            default:
+                //If somehow theres an error, default to the 9MHz mode
+                mode = 9;
+            break;
+        }
+
+    }
+    return 0;
+}
