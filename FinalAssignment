@@ -1,0 +1,671 @@
+/*
+===============================================================================
+ Name        : Capstone.c
+ Author      : $(author)
+ Version     :
+ Copyright   : $(copyright)
+ Description : main definition
+===============================================================================
+*/
+
+// ColorSensorInput address 0100 000, 0x12
+
+#ifdef __USE_CMSIS
+#include "LPC17xx.h"
+#endif
+
+#include <cr_section_macros.h>
+
+// TODO: insert other include files here
+//set up FIO and PLL for use
+struct FIOstruct {
+    unsigned int DIR;
+    unsigned int filler[3]; // so MASK has offset 0x10 from DIR
+    unsigned int MASK;
+    unsigned int PIN;
+    unsigned int SET;
+    unsigned int CLR;
+};
+
+struct I2struct {
+    unsigned int CONSET;
+    unsigned int STAT;
+    unsigned int DAT;
+    unsigned int ADR0;
+    unsigned int SCLH;
+    unsigned int SCLL;
+    unsigned int CONCLR;
+    unsigned int MMCCTRL;
+    unsigned int ADR1;
+    unsigned int ADR2;
+    unsigned int ADR3;
+    unsigned int DATA_BUFFER;
+    unsigned int MASK0;
+    unsigned int MASK1;
+    unsigned int MASK2;
+    unsigned int MASK3;
+};
+
+// TODO: insert other definitions and declarations here
+#define FIO ((volatile struct FIOstruct *)0x2009c000)
+#define I2 ((volatile struct I2struct *)0x4001C000)
+//#define Timer ((volatile struct Timerstruct *)0x40004000)
+#define PCLKSEL0  (*(volatile unsigned int *)0x400FC1A8)
+#define PINSEL0 (*(volatile unsigned int *)0x4002C000)
+#define PINSEL1 (*(volatile unsigned int *)0x4002C004)
+#define PINSEL3 (*(volatile unsigned int *)0x4002C00C)
+#define PINMODE0 (*(volatile unsigned int *)0x4002c040)
+#define PINMODE4 (*(volatile unsigned int *)0x4002C050)
+#define FIO2PIN (*(volatile unsigned int *)0x2009c054)
+#define IO0IntEnR (*(volatile unsigned int *)0x40028090)
+#define IO0IntClr (*(volatile unsigned int *)0x4002808C)
+#define ISER0 (*(volatile unsigned int *)0xE000E100)
+#define T0MR0 (*(volatile unsigned int *)0x40004018)
+#define T0TC (*(volatile unsigned int *)0x40004008)
+#define T0CTCR (*(volatile unsigned int *)0x40004070)
+#define T0IR (*(volatile unsigned int *)0x40004000)
+#define T0MCR (*(volatile unsigned int *)0x40004014)
+#define T0TCR (*(volatile unsigned int *)0x40004004)
+#define PCONP (*(volatile unsigned int *)0x400FC0C4)
+#define PCLKSEL0 (*(volatile unsigned int *)0x400FC1A8)
+#define PCLKSEL1 (*(volatile unsigned int *)0x400FC1AC)
+#define U3LCR (*(volatile unsigned int *)0x4009C00C)
+#define U3DLL (*(volatile unsigned int *)0x4009C000)
+#define U3DLM (*(volatile unsigned int *)0x4009C004)
+#define U3FDR (*(volatile unsigned int *)0x4009C028)
+#define U3FCR (*(volatile unsigned int *)0x4009C008)
+#define U3LSR (*(volatile unsigned int *)0x4009C014)
+#define U3THR (*(volatile unsigned int *)0x4009C000)
+#define T3TCR (*(volatile unsigned int *)0x40094004)
+#define T3PR (*(volatile unsigned int *)0x4009400C)
+#define T3PC (*(volatile unsigned int *)0x40094010)
+#define T3CCR (*(volatile unsigned int *)0x40094028)
+#define T3TC (*(volatile unsigned int *)0x40094008)
+#define IO0IntStatR (*(volatile unsigned int *)0x40028084)
+#define PCONP (*(volatile unsigned int *)0x400FC0C4)
+#define PWM1 (*(volatile unsigned int *)0x40018000)
+#define WDTC (*(volatile unsigned int *)0x40000004)
+#define WDMOD (*(volatile unsigned int *)0x40000000)
+#define WDFEED (*(volatile unsigned int *)0x40000008)
+#define WDTV (*(volatile unsigned int *)0x4000000C)
+
+enum operatingModes{Fault,Temp,Color,TempSend,ColorSend};
+
+enum operatingModes mode = Temp;
+int freqPercentage[3] = {0,0,0};
+int temp[250];
+int colorArray[250][3];
+int tempSpot = 0;
+int colorSpot = 0;
+int waitTime = 5000000;
+int colorReading = 0;
+int colorRead = 0;
+
+void setUpColorSensor(){
+    PCONP |= (1<<23);
+    PCLKSEL1 &= ~(1<<15);
+    PCLKSEL1 |=(1<<14);
+    T3TCR = 0b11;
+    T3PR = 4;
+    T3CCR = 1;
+    PINSEL1|=(0b11<<14);
+    IO0IntClr = (1<<23); // clear any old events on P0.23
+    IO0IntEnR &= ~(1<<23); // disable rising edge on P0.23
+    ISER0 = (1<<21);
+}
+
+void wait_ticks(int ticks)
+{
+    volatile int count;
+    for (count=0; count<ticks; count++){
+        //do nothing
+    }//for (count=0...)
+}//void wait_ticks
+
+void waitForSi(){
+    while(((I2[0].CONSET>>3)&1)==0){
+        //Do nothing until SI changes
+    }
+}
+
+void setI2CClockSource(int mode){ //Gives a slightly easier way to set Clock Source
+    switch(mode){
+        case 0:
+            //Sets IRC as CClk/4
+            PCLKSEL0&=~(1<<15)&~(1<<14);
+        break;
+        case 1:
+            //Sets IRC as CClk/1
+            PCLKSEL0&=~(1<<15);
+            PCLKSEL0|=(1<<14);
+        break;
+        case 10:
+            //Sets IRC as CClk/2
+            PCLKSEL0&=~(1<<14);
+            PCLKSEL0|=(1<<15);
+        break;
+        case 11:
+            //Sets IRC as CClk/8
+            PCLKSEL0|=(1<<15)|(1<<14);
+        break;
+        default:
+            //if not one of the 4 modes, do nothing
+        break;
+    }
+    return;
+}
+
+void setUpI2C() {
+    PINSEL1 |= (1<<22) | (1<<24);
+    PINSEL1 &= ~(1<<23) & ~(1<<25);
+    setI2CClockSource(0);
+    //set I2C SCLL
+    I2[0].SCLL = 5;
+    //set to 50% duty cycle
+    I2[0].SCLH = 5;
+    //Clear System
+    I2[0].CONCLR=(1<<6);
+    //enable I2C
+    I2[0].CONSET = (1<<6);
+}
+
+void setUpUART(){
+    PCONP |= (1<<25);
+    PCLKSEL1 &=~(0b11<<18);
+    U3LCR |= (1<<7);
+    U3DLL = 52;
+    U3DLM = 0;
+    U3FDR = (1<<4);
+    U3FCR = 1;
+    PINSEL0 |= 0b1010;
+    U3LCR &= ~(1<<7);
+    U3LCR|=0b11;
+}
+
+void feedTheDoog(){
+    WDFEED = 0xAA;
+    WDFEED = 0x55;
+}
+
+void setUpWatchdoog(){
+    PCLKSEL0 &= ~(0b11);
+    WDTC=25000000;
+    WDMOD |= 0b11;
+    feedTheDoog();
+}
+
+void I2CDataSend(int data, int deviceAddress, int regAddress){
+    //Send Start
+    I2[0].CONSET=(1<<3);
+    I2[0].CONSET=(1<<5);
+    I2[0].CONCLR=(1<<3);
+    waitForSi();
+    I2[0].CONCLR=(1<<5);
+    //Send Message From Here
+    //First send devAdd << 1
+    I2[0].DAT=deviceAddress<<1;
+    I2[0].CONCLR=(1<<3);
+    waitForSi();
+    //then send Reg Add
+    I2[0].DAT=regAddress;
+    I2[0].CONCLR=(1<<3);
+    waitForSi();
+    //then send Data.
+    I2[0].DAT=data;
+    I2[0].CONCLR=(1<<3);
+    waitForSi();
+    //Stop Sending Data
+    I2[0].CONSET=(1<<4);
+    I2[0].CONCLR=(1<<3);
+    while(((I2[0].CONSET>>4)&1)==1){
+        //Do nothing until STO is 0
+    }
+}
+
+int I2CDataRead(int deviceAddress, int regAddress){
+    int dataRead[2];
+    int dataReturn;
+    //Send Start
+    I2[0].CONSET=(1<<3);
+    I2[0].CONSET=(1<<5);
+    I2[0].CONCLR=(1<<3);
+    waitForSi();
+    I2[0].CONCLR=(1<<5);
+    //First send devAdd << 1 +1 to indicate read mode
+    I2[0].DAT=(deviceAddress<<1);
+    I2[0].CONCLR=(1<<3);
+    waitForSi();
+    //then send Reg Add
+    I2[0].DAT=regAddress;
+    I2[0].CONCLR=(1<<3);
+    waitForSi();
+    //send new start
+    I2[0].CONSET|=(1<<5);
+    I2[0].CONCLR=(1<<3);
+    waitForSi();
+    I2[0].CONCLR=(1<<5);
+    I2[0].DAT=(deviceAddress<<1)+1;
+    I2[0].CONCLR=(1<<3);
+    waitForSi();
+    //get 1st Data
+    I2[0].CONSET=(1<<2);
+    I2[0].CONCLR=(1<<3);
+    waitForSi();
+    dataRead[0] = I2[0].DAT;
+    //get 2nd Data
+    I2[0].CONCLR=(1<<2);
+    I2[0].CONCLR=(1<<3);
+    waitForSi();
+    dataRead[1] = I2[0].DAT;
+    //Stop Sending Data
+    I2[0].CONSET|=(1<<4);
+    I2[0].CONCLR=(1<<3);
+    while(((I2[0].CONSET>>4)&1)==1){
+        //Do nothing until STO is 0
+    }
+    dataReturn = (dataRead[0]<<8);
+    dataReturn += dataRead[1];
+    dataReturn = (dataReturn>>5);
+    return dataReturn;
+}
+
+int I2CSingleDataRead(int deviceAddress, int regAddress){
+    int dataRead;
+    //Send Start
+    I2[0].CONSET=(1<<3);
+    I2[0].CONSET=(1<<5);
+    I2[0].CONCLR=(1<<3);
+    waitForSi();
+    I2[0].CONCLR=(1<<5);
+    //First send devAdd << 1 +1 to indicate read mode
+    I2[0].DAT=(deviceAddress<<1);
+    I2[0].CONCLR=(1<<3);
+    waitForSi();
+    //then send Reg Add
+    I2[0].DAT=regAddress;
+    I2[0].CONCLR=(1<<3);
+    waitForSi();
+    //send new start
+    I2[0].CONSET|=(1<<5);
+    I2[0].CONCLR=(1<<3);
+    waitForSi();
+    I2[0].CONCLR=(1<<5);
+    I2[0].DAT=(deviceAddress<<1)+1;
+    I2[0].CONCLR=(1<<3);
+    waitForSi();
+    //get 1st Data
+    I2[0].CONCLR=(1<<2);
+    I2[0].CONCLR=(1<<3);
+    waitForSi();
+    dataRead = I2[0].DAT;
+    //Stop Sending Data
+    I2[0].CONSET|=(1<<4);
+    I2[0].CONCLR=(1<<3);
+    while(((I2[0].CONSET>>4)&1)==1){
+        //Do nothing until STO is 0
+    }
+    return dataRead;
+}
+
+void setUpIOE(){
+    I2CDataSend(0x00,0b0100000,0x00);
+}
+
+void setUpGPIO(){
+    FIO[2].DIR &= ~(0b11<<11);
+    FIO[0].DIR|=(0b11<<2);
+    PINMODE4 |= (0b1111<<22);
+}
+
+void readColorSensor(){
+    IO0IntEnR |= (1<<23); // enable rising edge on P0.23
+    float redTime = 0;
+    float greenTime = 0;
+    float blueTime = 0;
+    float redBase = 3780;
+    float greenBase = 1800;
+    float blueBase = 1280;
+    float redFreq;
+    float greenFreq;
+    float blueFreq;
+    float freqRatios[3];
+    //set low 2 low 3
+    FIO[0].PIN &=~(1<<2);
+    FIO[0].PIN &=~(1<<3);
+    while(colorRead == 0){
+
+    }
+    colorRead = 0;
+    while(colorRead == 0){
+
+    }
+    //get redTime
+    redTime = colorReading;
+    redFreq = 1/(redTime/790000);
+    colorRead = 0;
+    //set high 2 high 3
+    FIO[0].PIN |= (1<<2);
+    FIO[0].PIN |= (1<<3);
+    while(colorRead == 0){
+
+    }
+    colorRead = 0;
+    while(colorRead == 0){
+
+    }
+    //get greenTime
+    greenTime = colorReading;
+    greenFreq = 1/(greenTime/790000);
+    colorRead = 0;
+    //set low 2 high 3
+    FIO[0].PIN &=~(1<<2);
+    FIO[0].PIN |= (1<<3);
+    while(colorRead == 0){
+
+    }
+    colorRead = 0;
+    while(colorRead == 0){
+
+    }
+    //get blue time
+    blueTime = colorReading;
+    blueFreq = 1/(blueTime/790000);
+    colorRead = 0;
+    // calculate frequencies
+    //set freqPercent to red/clear,green/clear,blue/clear
+    IO0IntEnR &= ~(1<<23); // disable interrupt;
+    freqRatios[0]=redFreq/redBase;
+    freqRatios[1]=greenFreq/greenBase;
+    freqRatios[2]=blueFreq/blueBase;
+    if(freqRatios[0]>0.49){
+        freqPercentage[0] = 2;
+    } else if (freqRatios[0]>.37){
+        freqPercentage[0]=1;
+    } else {
+        freqPercentage[0]=0;
+    }
+
+    if(freqRatios[1]>0.38){
+        freqPercentage[1] = 2;
+    } else if (freqRatios[0]>.32){
+        freqPercentage[1]=1;
+    } else {
+        freqPercentage[1]=0;
+    }
+
+    if(freqRatios[2]>0.48){
+        freqPercentage[2] = 2;
+    } else if (freqRatios[2]>.38){
+        freqPercentage[2]=1;
+    } else {
+        freqPercentage[2]=0;
+    }
+
+    return;
+}
+
+int checkButtons(){
+    if((((FIO[2].PIN)>>11)&1)==0){
+        return 1;
+    } else if((((FIO[2].PIN)>>12)&1)==0){
+        return 2;
+    } else{
+        return 0;
+    }
+}
+
+void addToTempArray(int *oldArray,int length,int spot,int data){
+    int count;
+    if(spot<length-1){
+        oldArray[spot]=data;
+    } else {
+        for(count=0;count<length-1;count++){
+            oldArray[count]=oldArray[count+1];
+        }
+        oldArray[length-1]=data;
+    }
+}
+
+void addToColorArray(int oldArray[250][3],int length,int spot, int *data){
+    int outerCount;
+    int innerCount;
+    if(spot<length-1){
+        for(innerCount=0;innerCount<3;innerCount++){
+            oldArray[spot][innerCount]=data[innerCount];
+        }
+    } else {
+        for(outerCount=0;outerCount<length-1;outerCount++){
+            for(innerCount=0;innerCount<3;innerCount++){
+                oldArray[outerCount][innerCount]=oldArray[outerCount+1][innerCount];
+            }
+        }
+        for(innerCount=0;innerCount<3;innerCount++){
+            oldArray[spot][innerCount]=data[innerCount];
+        }
+    }
+}
+
+int intToAscii(int number){
+    switch(number){
+        case 0:
+            return 48;
+        break;
+        case 1:
+            return 49;
+        break;
+        case 2:
+            return 50;
+        break;
+        case 3:
+            return 51;
+        break;
+        case 4:
+            return 52;
+        break;
+        case 5:
+            return 53;
+        break;
+        case 6:
+            return 54;
+        break;
+        case 7:
+            return 55;
+        break;
+        case 8:
+            return 56;
+        break;
+        case 9:
+            return 57;
+        break;
+        default:
+            return 0;
+        break;
+    }
+}
+
+void sendUARTMessage(int data){
+    U3THR = intToAscii(data/10);
+    while(!((U3LSR>>5&1)==1)){
+
+    }
+    U3THR = intToAscii(data%10);
+    while(!((U3LSR>>5&1)==1)){
+
+    }
+    U3THR = 13;
+    while(!((U3LSR>>5&1)==1)){
+
+    }
+    U3THR = 10;
+    while(!((U3LSR>>5&1)==1)){
+
+    }
+}
+
+void patTheGoodDoog(){
+    int embm[13] = {69,69,75,85,77,32,66,79,75,85,77,13,10};
+    int count;
+    for(count = 0;count<13;count++){
+        U3THR = embm[count];
+        while(!((U3LSR>>5&1)==1)){
+
+        }
+    }
+    WDMOD &= ~(1<<2);
+}
+
+void colorSwitch(int state){
+    switch(state){
+        case 1:
+            U3THR = 80;
+            while(!((U3LSR>>5&1)==1)){
+
+            }
+        break;
+        case 2:
+            U3THR = 68;
+            while(!((U3LSR>>5&1)==1)){
+
+            }
+        break;
+        default:
+            U3THR = 78;
+            while(!((U3LSR>>5&1)==1)){
+
+            }
+        break;
+    }
+    U3THR = 32;
+    while(!((U3LSR>>5&1)==1)){
+
+    }
+    return;
+}
+
+void sendColorData(int *colorArray){
+    U3THR = 82;
+    while(!((U3LSR>>5&1)==1)){
+
+    }
+    colorSwitch(colorArray[0]);
+    U3THR = 71;
+    while(!((U3LSR>>5&1)==1)){
+
+    }
+    colorSwitch(colorArray[1]);
+    U3THR = 66;
+    while(!((U3LSR>>5&1)==1)){
+
+    }
+    colorSwitch(colorArray[2]);
+    U3THR = 13;
+    while(!((U3LSR>>5&1)==1)){
+
+    }
+    U3THR = 10;
+    while(!((U3LSR>>5&1)==1)){
+
+    }
+    wait_ticks(5000);
+}
+
+void takeMeasurements(void){
+    int count;
+    int innerCount;
+    switch(mode){
+        case Fault:
+            while(1){
+
+            }
+        break;
+        case Temp:
+            addToTempArray(temp,250,tempSpot,I2CSingleDataRead(0b1001111,0x00));
+            if(tempSpot<249){
+              tempSpot++;
+            }
+        break;
+        case Color:
+            readColorSensor();
+            addToColorArray(colorArray,250,colorSpot,freqPercentage);
+            if(colorSpot<249){
+                colorSpot++;
+            }
+        break;
+        case TempSend:
+            if(tempSpot>0){
+                sendUARTMessage(temp[0]);
+                for(count = 0;count<tempSpot;count++){
+                    temp[count]=temp[count+1];
+                }
+                tempSpot--;
+            }
+        break;
+        case ColorSend:
+        if(colorSpot>0){
+            sendColorData(colorArray[0]);
+            for(count = 0;count<colorSpot;count++){
+                for(innerCount = 0;innerCount<3;innerCount++){
+                    colorArray[count][innerCount]=colorArray[count+1][innerCount];
+                }
+            }
+            colorSpot--;
+        }
+        break;
+        default:
+        break;
+    }
+}
+
+ 
+
+void TIMER0_IRQHandler(void){
+    T0IR = (1<<0);
+    //T0MR0=T0TC+waitTime;
+    //takeMeasurements();
+}
+
+void EINT3_IRQHandler(void){
+    if ((IO0IntStatR>>23) & 1) { // rising edge on P0.23
+        if(((T3TCR>>1)&1)!=0){
+            T3TCR &= ~(1<<1);
+        } else {
+            colorReading = T3TC;
+            colorRead = 1;
+            T3TCR |= (1<<1);
+        }
+        IO0IntClr = (1<<23); // clear this event on P0.23
+    }
+}
+
+
+int main(void) {
+    setUpWatchdoog();
+    setUpUART();
+    if(((WDMOD>>2)&1)==1){
+        patTheGoodDoog();
+    }
+    int buttonRead;
+    setUpGPIO();
+    setUpI2C();
+    setUpColorSensor();
+    WDTV;
+    while(1) {
+        feedTheDoog();
+        buttonRead = checkButtons();
+        if(buttonRead == 1){
+            if(mode==0){
+                mode = ColorSend;
+            } else {
+                mode--;
+            }
+        } else if (buttonRead == 2){
+            mode++;
+            if(mode>4){
+                mode = Temp;
+            }
+        }
+        takeMeasurements();
+        wait_ticks(300000);
+    }
+    return 0 ;
+}
