@@ -1,0 +1,302 @@
+/*
+===============================================================================
+ Name        : Assignment_2.c
+ Author      : Coby Moore & Andrew McMasters & Patrick Bohn
+ Version     :
+ Copyright   : $(copyright)
+ Description : main definition
+===============================================================================
+*/
+
+/*#ifdef __USE_CMSIS
+#include "LPC17xx.h"
+#endif
+#include <cr_section_macros.h>*/
+
+struct FIOstruct {
+    unsigned int DIR;
+    unsigned int filler[3]; // so MASK has offset 0x10 from DIR
+    unsigned int MASK;
+    unsigned int PIN;
+    unsigned int SET;
+    unsigned int CLR;
+};
+
+//Define FIO;
+#define FIO ((volatile struct FIOstruct *)0x2009c000)
+//BELOW IS PINMODE
+#define PINMODE1 (*(volatile unsigned int *)0x4002c044)
+#define PINMODE3 (*(volatile unsigned int *)0x4002c04C)
+
+//define enums
+enum playerTurn{Player1,Player2};
+enum Button {P1BR,P1BG,P1BB,P2BR,P2BG,P2BB,NoButton};
+
+void wait_ticks(int ticks)
+{
+    volatile int count;
+    for (count=0; count<ticks; count++){
+        //do nothing
+    }//for (count=0...)
+}//void wait_ticks
+
+
+void resetGame(){
+    //turns all item leds back on
+    int count;
+    FIO[0].PIN |= (1<<4) | (1<<5) | (1<<10) | (1<<11);
+    for(count = 0;count<=7;count++){
+        FIO[2].PIN |= (1<<count);
+    }
+    return;
+}
+
+void initGame(){
+    int count;
+    // make all the red, green, blue, and score leds outputs
+    FIO[0].DIR |= (1<<4) | (1<<5) | (1<<10) | (1<<11) | (1<<21) | (1<<22);
+    for(count = 0;count<=7;count++){
+        FIO[2].DIR |= (1<<count);
+    }
+    FIO[2].DIR |= (1<<8) | (1<<10);
+    //make all the player buttons inputs
+    FIO[0].DIR &= ~(1<<17) & ~(1<<18) & ~(1<<23) & ~(1<<24);
+    FIO[1].DIR &= ~(1<<30) & ~(1<<31);
+    //set all the buttons to pull up
+    PINMODE1 &= ~(1<<2) & ~(1<<3) & ~(1<<4) & ~(1<<5);
+    PINMODE1 &= ~(1<<14) & ~(1<<15) & ~(1<<16) & ~(1<<17);
+    PINMODE3 &= ~(1<<28) & ~(1<<29) & ~(1<<30) & ~(1<<31);
+    //turn off the score leds to start the game.
+    FIO[0].PIN &= ~(1<<21) & ~(1<<22);
+    FIO[2].PIN &= ~(1<<8) & ~(1<<10);
+    //turn all the item leds on.
+    resetGame();
+    return;
+}
+
+int arraySum(int target[3]){
+    //gets the sum of elements of an array
+    int count;
+    int sum = 0;
+    for(count = 0;count< 3;count++){
+        sum += target[count];
+    }
+    return sum;
+}
+
+void countdownLEDS(int port, int leds[4], int startCount){
+    //quicker call for a group of leds to go down from 4 to a specified value
+    int ledCount;
+    for(ledCount = startCount;ledCount<=3;ledCount++){
+        FIO[port].PIN &= ~(1<<leds[ledCount]);
+    }
+}
+
+void countupLEDS(int port, int leds[2], int endCount){
+    //quicker call to have a group of leds that count from 0 to a specified value
+    int count;
+    for(count = 0;count<endCount;count++){
+        FIO[port].PIN |= (1<<leds[count]);
+    }
+}
+
+int game() {
+    enum playerTurn Turn;
+    enum Button Choice;
+    Turn = Player1;
+    int items[3] = {4,4,4};
+    int firstTurn = 1;
+    int playerChoice = 0;
+    int red[4] = {4,5,10,11};
+    int green[4] = {0,1,2,3};
+    int blue[4] = {4,5,6,7};
+    const int waitTime = 200000;
+    int sum = arraySum(items);
+    while(sum>0){
+        //detect which button is pressed if any.
+        if(((FIO[0].PIN>>17)&1) == 0){
+            Choice = P2BR;
+        } else if (((FIO[0].PIN>>18)&1)==0){
+            Choice = P1BR;
+        } else if (((FIO[0].PIN>>23)&1) == 0){
+            Choice = P1BG;
+        } else if (((FIO[0].PIN>>24)&1)==0){
+            Choice = P2BG;
+        } else if (((FIO[1].PIN>>30)&1) == 0){
+            Choice = P1BB;
+        } else if (((FIO[1].PIN>>31)&1)==0){
+            Choice = P2BB;
+        } else {
+            Choice = NoButton;
+        }
+
+        //initialize player choice
+        if(Choice!=NoButton&&firstTurn){
+            playerChoice = Choice%3;
+            firstTurn = 0;
+        }
+
+        //Handle the chosen button
+        if(Choice!=NoButton){
+            switch(Turn){
+                case Player1:
+                    switch(Choice){
+                        //Player 1 pressed the red button on their turn
+                        case P1BR:
+                            if(items[0]>0){
+                                if(playerChoice==0){
+                                    items[0]--;
+                                    countdownLEDS(0,red,items[0]);
+                                }
+                            }
+                        break;
+                        //Player 1 pressed the green button on their turn
+                       case P1BG:
+                            if(items[1]>0){
+                                if(playerChoice==1){
+                                    items[1]--;
+                                    countdownLEDS(2,green,items[1]);
+                                }
+                            }
+                        break;
+                        //Player 1 pressed the blue button on their turn
+                        case P1BB:
+                            if(items[2]>0){
+                                if(playerChoice==2){
+                                    items[2]--;
+                                    countdownLEDS(2,blue,items[2]);
+                                }
+                            }
+                        break;
+                        //Player 2 pressed the red button ending Player 1s turn
+                        case P2BR:
+                            if(items[0]>0){
+                                playerChoice = 0;
+                                items[0]--;
+                                countdownLEDS(0,red,items[0]);
+                                Turn = Player2;
+                            }
+                        break;
+                        //Player 2 pressed the green button ending Player 1s turn
+                        case P2BG:
+                            if(items[1]>0){
+                                playerChoice = 1;
+                                items[1]-=1;
+                                countdownLEDS(2,green,items[1]);
+                                Turn = Player2;
+                            }
+                        break;
+                        //Player 2 pressed the blue button ending Player 1s turn
+                        case P2BB:
+                            if(items[2]>0){
+                                playerChoice = 2;
+                                items[2]-=1;
+                                countdownLEDS(2,blue,items[2]);
+                                Turn = Player2;
+                            }
+                        break;
+                        //no button was pressed. This case is just so the compiler will stop yelling at me.
+                        case NoButton:
+
+                        break;
+                    }
+                break;
+                case Player2:
+                    switch(Choice){
+                        //Player 2 pressed the red button on their turn
+                        case P2BR:
+                            if(items[0]>0){
+                                if(playerChoice==0){
+                                    items[0]-=1;
+                                    countdownLEDS(0,red,items[0]);
+                                }
+                            }
+                        break;
+                        //Player 2 pressed the green button on their turn
+                        case P2BG:
+                            if(items[1]>0){
+                                if(playerChoice==1){
+                                    items[1]-=1;
+                                    countdownLEDS(2,green,items[1]);
+                                }
+                            }
+                        break;
+                        //Player 2 pressed the blue button on their turn
+                        case P2BB:
+                            if(items[2]>0){
+                                if(playerChoice==2){
+                                    items[2]-=1;
+                                    countdownLEDS(2,blue,items[2]);
+                                }
+                            }
+                        break;
+                        //Player 1 pressed the red button ending Player 2s turn
+                        case P1BR:
+                            if(items[0]>0){
+                                playerChoice = 0;
+                                items[0]-=1;
+                                countdownLEDS(0,red,items[0]);
+                                Turn = Player1;
+                            }
+                        break;
+                        //Player 1 pressed the green button ending Player 2s turn
+                        case P1BG:
+                            if(items[1]>0){
+                                playerChoice = 1;
+                                items[1]-=1;
+                                countdownLEDS(2,green,items[1]);
+                                Turn = Player1;
+                            }
+                        break;
+                        //Player 1 pressed the blue button ending Player 2s turn
+                        case P1BB:
+                        if(items[2]>0){
+                            playerChoice = 2;
+                            items[2]-=1;
+                            countdownLEDS(2,blue,items[2]);
+                            Turn = Player1;
+                        }
+                        break;
+                        //no button was pressed. This case is just so the compiler will stop yelling at me.
+                        case NoButton:
+
+                        break;
+                    }
+                break;
+            }
+            //wait to prevent button bounce
+            wait_ticks(waitTime);
+        }
+        //check how many items are left.
+        sum = arraySum(items);
+    }
+
+    return Turn;
+}
+
+void updateScore(int playerScore[2],int lastWinner){
+    int playerOnePort = 0;
+    int playerOneLights[2] = {21,22};
+    int playerTwoPort = 2;
+    int playerTwoLights[2] = {8,10};
+    //add 1 to the score column for last games winner
+    playerScore[lastWinner]++;
+    //send both players scores to the leds.
+    countupLEDS(playerOnePort,playerOneLights,playerScore[0]);
+    countupLEDS(playerTwoPort,playerTwoLights,playerScore[1]);
+    return;
+}
+
+int main(void) {
+    int playerScore[2]={0,0};
+    int lastWinner = 0;
+    //Initialize the pins and reset all the lights to the right starting state.
+    initGame();
+    //while both players have less than 2 wins, run a game, count the winner, then reset the game.
+    while(playerScore[0]<2&&playerScore[1]<2){
+        lastWinner = game();
+        updateScore(playerScore,lastWinner);
+        resetGame();
+    }
+    return 0 ;
+}//int main()
